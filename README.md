@@ -185,7 +185,7 @@ forever. Normalise names once on the desktop side instead.
 - **Modification times drive the audio diff.** A re-tagged FLAC is re-encoded.
   Restoring old files from a backup that preserves timestamps will not trigger
   one; use **Rescan library** after deleting the stale Opus if that happens.
-- **Manual edits in the Opus mirror are undone.** Delete an `.opus` whose
+- **Manual edits in the Opus mirror are ignored.** Delete an `.opus` whose
   source still exists and it is re-encoded; add one with no source and it is
   pruned. The mirror is derived state, not a second library.
 - **The folder picker runs off the main thread.** `systray` owns the main
