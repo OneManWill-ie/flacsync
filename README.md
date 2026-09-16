@@ -14,6 +14,14 @@ go mod tidy          # resolves the indirect dependencies
 go build -o flacsync.exe .
 ```
 
+The Windows executable includes the application icon. If `logo.ico` changes,
+regenerate the Windows resource before building:
+
+```powershell
+windres '--preprocessor=gcc -E -xc -DRC_INVOKED' app.rc -O coff -o flacsync_windows_amd64.syso
+go build -o flacsync.exe .
+```
+
 Requires Go 1.22+ and an encoder on `PATH`:
 
 - **`opusenc`** (from `opus-tools`) — recommended. Carries tags *and* embedded
@@ -48,6 +56,24 @@ On Windows, build with `-ldflags -H=windowsgui` to suppress the console window.
 First launch has no folders configured, so the tray shows `Status: Needs setup`.
 Open **Settings…** and pick the four directories; the engine restarts itself as
 soon as they are saved.
+
+### Start Automatically on Windows
+
+To start flacsync when you sign in to Windows:
+
+1. Press `Win + R`, enter `shell:startup`, and press Enter.
+2. Create a shortcut in the folder that points to `flacsync.exe`.
+3. In the shortcut properties, set **Start in** to the folder containing
+  `flacsync.exe`.
+
+For this project, the target can be:
+
+```text
+C:\Users\<username>\Documents\_misc\coding_projects\flacsync\flacsync.exe
+```
+
+No startup or boot arguments are required. To avoid a console window, build the
+Windows executable with `-ldflags -H=windowsgui` as described above.
 
 ### config.json
 
