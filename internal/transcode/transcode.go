@@ -120,12 +120,34 @@ func Convert(ctx context.Context, o Options) error {
 	var cmd *exec.Cmd
 
 	if o.Tool == Opusenc {
-		cmd = exec.CommandContext(ctx, binOr(o.OpusencPath, "opusenc"),
-			"--quiet",
-			"--bitrate", kbits(o.Bitrate),
-			"--vbr",
-			o.Input, tmp,
-		)
+		args := []string{"--quiet", "--bitrate", kbits(o.Bitrate), "--vbr"}
+
+		// opusenc auto-imports the FLAC's embedded picture, but only if it
+		// recognises the format (JPEG/PNG/GIF); a WebP cover, for instance,
+		// is silently skipped even though opusenc still exits 0. When that's
+		// what we're about to hit, convert the picture to a JPEG ourselves
+		// and hand it to opusenc explicitly via --picture, which takes
+		// priority and gives the track its artwork back. A source whose
+		// picture opusenc already handles natively is left untouched, so it
+		// isn't embedded twice.
+		if pic, err := embeddedPicture(o.Input); err == nil && len(pic) > 0 && !opusencAccepts(pic) {
+			if jpg, err := reencodeToJPEG(ctx, o.FFmpegPath, pic); err == nil && len(jpg) > 0 {
+				picFile, err := os.CreateTemp("", "flacsync-cover-*.jpg")
+				if err == nil {
+					if _, werr := picFile.Write(jpg); werr == nil {
+						picFile.Close()
+						defer os.Remove(picFile.Name())
+						args = append(args, "--picture", "3||||"+picFile.Name())
+					} else {
+						picFile.Close()
+						os.Remove(picFile.Name())
+					}
+				}
+			}
+		}
+
+		args = append(args, o.Input, tmp)
+		cmd = exec.CommandContext(ctx, binOr(o.OpusencPath, "opusenc"), args...)
 	} else {
 		// -vn is explicit about what ffmpeg would do anyway: drop the attached
 		// picture. Leaving it implicit makes the stream mapping noisier and
@@ -166,6 +188,15 @@ func Convert(ctx context.Context, o Options) error {
 // reports whether it created the file. An existing cover is left alone, and a
 // source with no artwork is not an error.
 //
+// The picture is read out of the FLAC file directly (see embeddedPicture)
+// rather than left for ffmpeg's own FLAC demuxer to find, because that
+// demuxer only exposes an attached picture whose declared MIME type is on a
+// short hardcoded allowlist (image/jpeg, image/png, ...). A WebP cover -
+// among others - fails that check and is dropped with just a log warning,
+// which previously meant a real cover was silently treated as "no artwork".
+// Piping the raw bytes through image2pipe instead lets ffmpeg sniff the
+// actual format from the content.
+//
 // The write goes through a unique temporary name because several workers can
 // be encoding tracks from the same album at once.
 func ExtractCover(ctx context.Context, ffmpegPath, input, dir string) (bool, error) {
@@ -173,6 +204,14 @@ func ExtractCover(ctx context.Context, ffmpegPath, input, dir string) (bool, err
 	if _, err := os.Stat(final); err == nil {
 		return false, nil
 	}
+
+	pic, err := embeddedPicture(input)
+	if err != nil || len(pic) == 0 {
+		// No attached picture, or the file couldn't be parsed: nothing to
+		// do, and nothing worth logging.
+		return false, nil
+	}
+
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return false, err
 	}
@@ -187,14 +226,14 @@ func ExtractCover(ctx context.Context, ffmpegPath, input, dir string) (bool, err
 
 	cmd := exec.CommandContext(ctx, binOr(ffmpegPath, "ffmpeg"),
 		"-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-		"-i", input,
-		"-an",
+		"-f", "image2pipe", "-i", "-",
 		"-frames:v", "1",
 		"-update", "1",
 		"-f", "image2",
 		"-c:v", "mjpeg",
 		tmpName,
 	)
+	cmd.Stdin = bytes.NewReader(pic)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
@@ -202,9 +241,9 @@ func ExtractCover(ctx context.Context, ffmpegPath, input, dir string) (bool, err
 		if ctx.Err() != nil {
 			return false, ctx.Err()
 		}
-		// No attached picture: ffmpeg exits non-zero with "does not contain
-		// any stream". Nothing to do, and nothing worth logging.
-		return false, nil
+		// A picture block was present but ffmpeg couldn't decode it (an
+		// exotic or corrupt format): worth logging, unlike "no artwork".
+		return false, fmt.Errorf("decode cover art: %w: %s", err, lastLines(stderr.String(), 3))
 	}
 
 	if info, err := os.Stat(tmpName); err != nil || info.Size() == 0 {
@@ -214,6 +253,33 @@ func ExtractCover(ctx context.Context, ffmpegPath, input, dir string) (bool, err
 		return false, fmt.Errorf("write %s: %w", final, err)
 	}
 	return true, nil
+}
+
+// reencodeToJPEG converts an embedded picture of some format opusenc won't
+// accept natively (WebP, chiefly) into a JPEG, entirely in memory. As in
+// ExtractCover, the bytes go in via image2pipe so ffmpeg sniffs the real
+// format from the content rather than trusting a declared MIME type.
+func reencodeToJPEG(ctx context.Context, ffmpegPath string, pic []byte) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, binOr(ffmpegPath, "ffmpeg"),
+		"-hide_banner", "-loglevel", "error", "-nostdin",
+		"-f", "image2pipe", "-i", "-",
+		"-frames:v", "1",
+		"-update", "1",
+		"-f", "mjpeg",
+		"-",
+	)
+	cmd.Stdin = bytes.NewReader(pic)
+	var out, stderr bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("reencode cover art: %w: %s", err, lastLines(stderr.String(), 3))
+	}
+	return out.Bytes(), nil
 }
 
 func binOr(bin, fallback string) string {
