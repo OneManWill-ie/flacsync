@@ -168,6 +168,7 @@ func Convert(ctx context.Context, o Options) error {
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
+	hideWindow(cmd)
 
 	if err := cmd.Run(); err != nil {
 		os.Remove(tmp)
@@ -236,6 +237,7 @@ func ExtractCover(ctx context.Context, ffmpegPath, input, dir string) (bool, err
 	cmd.Stdin = bytes.NewReader(pic)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
+	hideWindow(cmd)
 
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {
@@ -272,6 +274,7 @@ func reencodeToJPEG(ctx context.Context, ffmpegPath string, pic []byte) ([]byte,
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
+	hideWindow(cmd)
 
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {
