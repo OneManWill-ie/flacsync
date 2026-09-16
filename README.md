@@ -30,7 +30,7 @@ go build -o flacsync.exe .
 
 Requires Go 1.22+ and an encoder on `PATH`:
 
-- **`opusenc`** (from `opus-tools`) — recommended. Carries tags *and* embedded
+- **`opusenc`** (from `[opus-tools](https://opus-codec.org/downloads/)`) — recommended. Carries tags *and* embedded
   cover art into the Opus files.
 - **`ffmpeg`** with `libopus` — always works, but cannot embed cover art (see
   below). Also needed for the `cover.jpg` sidecar and nothing else.
