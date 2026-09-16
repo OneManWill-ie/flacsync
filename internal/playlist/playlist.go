@@ -171,6 +171,9 @@ func (m Mapping) rewrite(entry, srcDir, dstDir string) string {
 	}
 
 	local := fromAnySlash(entry)
+	if unmanagedLossy, ok := m.foreignAudioPath(local); ok {
+		return filepath.ToSlash(unmanagedLossy)
+	}
 
 	rel, ok := m.locate(local, srcDir)
 	if !ok {
@@ -205,7 +208,13 @@ func (m Mapping) locate(local, srcDir string) (string, bool) {
 		abs = filepath.Join(srcDir, local)
 	}
 	if rel, err := relUnder(root, filepath.Clean(abs)); err == nil {
-		return rel, true
+		if exists(filepath.Join(root, rel)) {
+			return rel, true
+		}
+		mapped := replaceExt(rel, m.SrcExt)
+		if mapped != rel && exists(filepath.Join(root, mapped)) {
+			return mapped, true
+		}
 	}
 
 	if !filepath.IsAbs(local) && exists(filepath.Join(root, local)) {
@@ -221,8 +230,31 @@ func (m Mapping) locate(local, srcDir string) (string, bool) {
 		if exists(filepath.Join(root, suffix)) {
 			return suffix, true
 		}
+		// Players may export a path from a different lossy library, such as
+		// _lossy/...track.mp3. Match its album-relative stem in our mirror,
+		// where the same track has the mapping's source extension.
+		mapped := replaceExt(suffix, m.SrcExt)
+		if mapped != suffix && exists(filepath.Join(root, mapped)) {
+			return mapped, true
+		}
 	}
 
+	return "", false
+}
+
+func (m Mapping) foreignAudioPath(local string) (string, bool) {
+	parts := strings.Split(filepath.ToSlash(filepath.Clean(local)), "/")
+	for i, part := range parts {
+		if !strings.EqualFold(part, "music") || i+1 >= len(parts) {
+			continue
+		}
+		foreign := parts[i+1:]
+		if strings.EqualFold(foreign[0], filepath.Base(m.SrcAudioRoot)) ||
+			strings.EqualFold(foreign[0], filepath.Base(m.DstAudioRoot)) {
+			return "", false
+		}
+		return filepath.Join("..", filepath.Join(foreign...)), true
+	}
 	return "", false
 }
 
@@ -260,6 +292,14 @@ func (m Mapping) swapExt(p string) string {
 		return p
 	}
 	return strings.TrimSuffix(p, filepath.Ext(p)) + m.DstExt
+}
+
+func replaceExt(p, ext string) string {
+	old := filepath.Ext(p)
+	if old == "" || ext == "" {
+		return p
+	}
+	return strings.TrimSuffix(p, old) + ext
 }
 
 func relUnder(root, p string) (string, error) {
