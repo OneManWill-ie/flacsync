@@ -14,6 +14,12 @@ go mod tidy          # resolves the indirect dependencies
 go build -o flacsync.exe .
 ```
 
+For a Windows build without a console window:
+
+```powershell
+go build -ldflags "-H=windowsgui" -o flacsync.exe .
+```
+
 The Windows executable includes the application icon. If `logo.ico` changes,
 regenerate the Windows resource before building:
 
@@ -42,7 +48,8 @@ cgo:
 | macOS | Xcode command line tools |
 | Windows | nothing (uses the Win32 API directly) |
 
-On Windows, build with `-ldflags -H=windowsgui` to suppress the console window.
+On Windows, use `go build -ldflags "-H=windowsgui" -o flacsync.exe .` to
+suppress the console window.
 
 ## Run
 
