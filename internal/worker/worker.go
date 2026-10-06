@@ -14,6 +14,7 @@ import (
 
 	"flacsync/internal/config"
 	"flacsync/internal/job"
+	"flacsync/internal/media"
 	"flacsync/internal/paths"
 	"flacsync/internal/playlist"
 	"flacsync/internal/state"
@@ -41,14 +42,10 @@ type Pool struct {
 	inflight map[string]struct{}
 }
 
-// New builds a pool sized by cfg.Workers and resolves the encoder once, so a
-// missing binary is reported at startup rather than once per track.
-func New(cfg config.Config, st *state.State, hashes *playlist.HashStore, logger *log.Logger) *Pool {
-	tool, err := transcode.Select(cfg.Encoder, cfg.FFmpegPath, cfg.OpusencPath)
-	if err != nil {
-		logger.Printf("encoder: %v", err)
-	}
-
+// New builds a pool sized by cfg.Workers. The encoder is resolved by the
+// caller so a missing binary is reported before any job is queued, rather
+// than failing once per track.
+func New(cfg config.Config, tool transcode.Tool, st *state.State, hashes *playlist.HashStore, logger *log.Logger) *Pool {
 	// "auto" only writes the sidecar when the encoder cannot embed artwork,
 	// so switching to opusenc silently stops littering the mirror.
 	writeCover := cfg.CoverArt == "folder" ||
@@ -232,8 +229,8 @@ func (p *Pool) mapping(d job.Direction) playlist.Mapping {
 	toMobile := playlist.Mapping{
 		SrcAudioRoot: p.cfg.LosslessDir,
 		DstAudioRoot: p.cfg.LossyDir,
-		SrcExt:       ".flac",
-		DstExt:       ".opus",
+		SrcExts:      media.Lossless,
+		DstExts:      []string{media.OpusExt},
 	}
 	if d == job.ToDesktop {
 		return toMobile.Invert()

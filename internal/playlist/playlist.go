@@ -90,13 +90,14 @@ func HashFile(path string) (string, error) {
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
-// Mapping describes how the media entries inside a playlist must be rewritten:
-// from one audio root and extension to the other.
+// Mapping describes how the media entries inside a playlist must be
+// rewritten: from one audio library to the other, swapping any of the source
+// extensions for one of the destination extensions.
 type Mapping struct {
-	SrcAudioRoot string // e.g. /music/_lossless
-	DstAudioRoot string // e.g. /music/_lossy_opus
-	SrcExt       string // ".flac"
-	DstExt       string // ".opus"
+	SrcAudioRoot string   // e.g. /music/_lossless
+	DstAudioRoot string   // e.g. /music/_lossy_opus
+	SrcExts      []string // e.g. [".flac", ".m4a"]
+	DstExts      []string // e.g. [".opus"]
 }
 
 // Invert returns the mapping for the opposite direction.
@@ -104,8 +105,8 @@ func (m Mapping) Invert() Mapping {
 	return Mapping{
 		SrcAudioRoot: m.DstAudioRoot,
 		DstAudioRoot: m.SrcAudioRoot,
-		SrcExt:       m.DstExt,
-		DstExt:       m.SrcExt,
+		SrcExts:      m.DstExts,
+		DstExts:      m.SrcExts,
 	}
 }
 
@@ -180,7 +181,7 @@ func (m Mapping) rewrite(entry, srcDir, dstDir string) string {
 		return filepath.ToSlash(m.swapExt(local))
 	}
 
-	target := filepath.Join(filepath.Clean(m.DstAudioRoot), m.swapExt(rel))
+	target := filepath.Join(filepath.Clean(m.DstAudioRoot), m.targetName(rel))
 	out, err := filepath.Rel(dstDir, target)
 	if err != nil {
 		out = target
@@ -211,8 +212,7 @@ func (m Mapping) locate(local, srcDir string) (string, bool) {
 		if exists(filepath.Join(root, rel)) {
 			return rel, true
 		}
-		mapped := replaceExt(rel, m.SrcExt)
-		if mapped != rel && exists(filepath.Join(root, mapped)) {
+		if mapped, ok := m.sourceTwin(rel); ok {
 			return mapped, true
 		}
 	}
@@ -232,9 +232,8 @@ func (m Mapping) locate(local, srcDir string) (string, bool) {
 		}
 		// Players may export a path from a different lossy library, such as
 		// _lossy/...track.mp3. Match its album-relative stem in our mirror,
-		// where the same track has the mapping's source extension.
-		mapped := replaceExt(suffix, m.SrcExt)
-		if mapped != suffix && exists(filepath.Join(root, mapped)) {
+		// where the same track has one of the mapping's source extensions.
+		if mapped, ok := m.sourceTwin(suffix); ok {
 			return mapped, true
 		}
 	}
@@ -287,11 +286,62 @@ func isLetter(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
+// sourceTwin turns an entry whose extension is not in the source set into one
+// that is, e.g. matching an _lossy/track.mp3 entry against track.flac or
+// track.m4a in the mirror. The candidate must really exist, so a wrong guess
+// never silently invents a path.
+func (m Mapping) sourceTwin(p string) (string, bool) {
+	for _, ext := range m.SrcExts {
+		mapped := replaceExt(p, ext)
+		if mapped == p {
+			continue
+		}
+		if exists(filepath.Join(m.SrcAudioRoot, mapped)) {
+			return mapped, true
+		}
+	}
+	return "", false
+}
+
+// swapExt replaces a source-library extension with the first destination
+// extension. Entries already outside the source set pass through untouched.
 func (m Mapping) swapExt(p string) string {
-	if !strings.EqualFold(filepath.Ext(p), m.SrcExt) {
+	if !hasAnyExt(p, m.SrcExts) || len(m.DstExts) == 0 {
 		return p
 	}
-	return strings.TrimSuffix(p, filepath.Ext(p)) + m.DstExt
+	return replaceExt(p, m.DstExts[0])
+}
+
+// targetName turns a located source-relative path into the relative name of
+// its twin. It is the first destination extension, except when going back to
+// the desktop: there several lossless formats share one Opus twin, so the
+// twin that really exists on disk wins.
+func (m Mapping) targetName(rel string) string {
+	if !hasAnyExt(rel, m.SrcExts) || len(m.DstExts) == 0 {
+		return rel
+	}
+	if len(m.DstExts) == 1 {
+		return replaceExt(rel, m.DstExts[0])
+	}
+
+	stem := strings.TrimSuffix(rel, filepath.Ext(rel))
+	for _, ext := range m.DstExts {
+		if exists(filepath.Join(m.DstAudioRoot, stem+ext)) {
+			return stem + ext
+		}
+	}
+	return replaceExt(rel, m.DstExts[0])
+}
+
+// hasAnyExt reports whether p ends in one of exts, ignoring case.
+func hasAnyExt(p string, exts []string) bool {
+	ext := filepath.Ext(p)
+	for _, e := range exts {
+		if strings.EqualFold(ext, e) {
+			return true
+		}
+	}
+	return false
 }
 
 func replaceExt(p, ext string) string {

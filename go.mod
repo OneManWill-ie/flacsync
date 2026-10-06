@@ -6,6 +6,7 @@ require (
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/getlantern/systray v1.2.2
 	github.com/sqweek/dialog v0.0.0-20260123140253-64c163d53aac
+	golang.org/x/image v0.46.0
 )
 
 require (

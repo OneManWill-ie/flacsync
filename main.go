@@ -14,6 +14,8 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/sqweek/dialog"
+
 	"flacsync/internal/config"
 	"flacsync/internal/playlist"
 	"flacsync/internal/state"
@@ -24,21 +26,23 @@ import (
 func main() {
 	var (
 		cfgFlag  = flag.String("config", "", "path to config.json (default: per-user config directory)")
+		logFlag  = flag.String("log", "", "write logs to this file (default: stderr, or flacsync.log beside config.json when there is no console)")
 		headless = flag.Bool("headless", false, "run without a tray icon (service mode)")
 		verbose  = flag.Bool("v", false, "log every filesystem event and job")
 	)
 	flag.Parse()
 
-	logger := log.New(os.Stderr, "", log.LstdFlags)
-
 	cfgPath := *cfgFlag
 	if cfgPath == "" {
 		p, err := config.DefaultPath()
 		if err != nil {
-			logger.Fatalf("config: %v", err)
+			log.Fatalf("config: %v", err)
 		}
 		cfgPath = p
 	}
+
+	logger, closeLog := newLogger(*logFlag, cfgPath)
+	defer closeLog()
 
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
@@ -47,6 +51,11 @@ func main() {
 	tool, terr := transcode.Select(cfg.Encoder, cfg.FFmpegPath, cfg.OpusencPath)
 	if terr != nil {
 		logger.Printf("warning: %v", terr)
+		if !*headless {
+			// Give the user one clear reason instead of an idle tray and a
+			// log line they cannot see in a GUI build.
+			dialog.Message("%s", terr.Error()).Title("No audio encoder").Error()
+		}
 	} else if !tool.EmbedsCoverArt() && cfg.CoverArt != "none" {
 		logger.Printf("encoder %s cannot embed cover art; writing %s beside the tracks "+
 			"(install opus-tools to embed it instead)", tool, transcode.CoverFile)

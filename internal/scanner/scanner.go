@@ -11,6 +11,7 @@ import (
 
 	"flacsync/internal/config"
 	"flacsync/internal/job"
+	"flacsync/internal/media"
 	"flacsync/internal/paths"
 	"flacsync/internal/playlist"
 )
@@ -64,10 +65,15 @@ func scanAudio(cfg config.Config, stats *Stats) ([]job.Job, error) {
 	var jobs []job.Job
 
 	err := paths.WalkFiles(cfg.LosslessDir, func(p string, d fs.DirEntry) error {
-		if !paths.HasExt(p, ".flac") {
+		if !media.IsLossless(p) {
 			return nil
 		}
-		dst, err := paths.Map(cfg.LosslessDir, cfg.LossyDir, p, ".flac", ".opus")
+		// When two formats own the same twin, only the preferred one is
+		// worth converting.
+		if media.PreferredSource(cfg.LosslessDir, p) != p {
+			return nil
+		}
+		dst, err := media.OpusPath(cfg.LosslessDir, cfg.LossyDir, p)
 		if err != nil {
 			return nil
 		}
@@ -97,14 +103,10 @@ func scanAudio(cfg config.Config, stats *Stats) ([]job.Job, error) {
 	}
 
 	err = paths.WalkFiles(cfg.LossyDir, func(p string, d fs.DirEntry) error {
-		if !paths.HasExt(p, ".opus") {
+		if !media.IsOpus(p) {
 			return nil
 		}
-		src, err := paths.Map(cfg.LossyDir, cfg.LosslessDir, p, ".opus", ".flac")
-		if err != nil {
-			return nil
-		}
-		if paths.Exists(src) {
+		if _, ok := media.SourcePath(cfg.LosslessDir, cfg.LossyDir, p); ok {
 			return nil
 		}
 		jobs = append(jobs, job.Job{Kind: job.Delete, Dst: p, Root: cfg.LossyDir})

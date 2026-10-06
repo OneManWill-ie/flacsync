@@ -29,8 +29,9 @@ type Config struct {
 	Workers    int    `json:"workers"`
 	DebounceMS int    `json:"debounce_ms"`
 
-	// Encoder is "auto", "ffmpeg" or "opusenc". Only opusenc carries embedded
-	// cover art into the Opus file; "auto" prefers it when it is installed.
+	// Encoder is "auto", "ffmpeg" or "opusenc". "auto" requires opusenc so
+	// embedded cover art is never dropped silently; "ffmpeg" is an explicit
+	// opt-in for libraries without artwork.
 	Encoder     string `json:"encoder"`
 	FFmpegPath  string `json:"ffmpeg_path"`
 	OpusencPath string `json:"opusenc_path"`

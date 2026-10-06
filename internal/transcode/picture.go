@@ -82,6 +82,71 @@ func embeddedPicture(path string) ([]byte, error) {
 	}
 }
 
+// promoteFrontCover rewrites pictures that carry the "other" type (0) in a
+// FLAC file to "front cover" (3). ffmpeg writes every picture it muxes into
+// FLAC as type 0, and players such as foobar2000 only treat type 3 as album
+// art. This runs on the temporary FLAC synthesized from a non-FLAC source,
+// before opusenc imports its picture, so user files are never touched.
+//
+// The file is reopened read-write and only the four big-endian type bytes at
+// the start of each PICTURE block body are replaced; block layout and length
+// are unchanged.
+func promoteFrontCover(path string) error {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(f, header); err != nil {
+		return err
+	}
+	if string(header) != "fLaC" {
+		return fmt.Errorf("%s: not a FLAC file", path)
+	}
+
+	for {
+		if _, err := io.ReadFull(f, header); err != nil {
+			return nil // end of stream
+		}
+		last := header[0]&0x80 != 0
+		blockType := header[0] & 0x7f
+		length := int64(header[1])<<16 | int64(header[2])<<8 | int64(header[3])
+
+		const pictureBlock = 6
+		if blockType == pictureBlock {
+			if length < 4 {
+				return fmt.Errorf("%s: picture block is too short", path)
+			}
+			pos, err := f.Seek(0, io.SeekCurrent)
+			if err != nil {
+				return err
+			}
+			var typ [4]byte
+			if _, err := io.ReadFull(f, typ[:]); err != nil {
+				return err
+			}
+			if binary.BigEndian.Uint32(typ[:]) == 0 {
+				typ = [4]byte{0, 0, 0, frontCoverType}
+				if _, err := f.WriteAt(typ[:], pos); err != nil {
+					return err
+				}
+			}
+			if _, err := f.Seek(pos+length, io.SeekStart); err != nil {
+				return err
+			}
+		} else {
+			if _, err := f.Seek(length, io.SeekCurrent); err != nil {
+				return err
+			}
+		}
+		if last {
+			return nil
+		}
+	}
+}
+
 // opusencAccepts reports whether opusenc's own picture importer will embed
 // pic as-is. opusenc (and its automatic FLAC-picture import) only recognises
 // JPEG, PNG and GIF; anything else - a WebP cover being the case that
@@ -101,6 +166,12 @@ func opusencAccepts(pic []byte) bool {
 	default:
 		return false
 	}
+}
+
+// isWebP sniffs the RIFF....WEBP container. WebP is the format opusenc
+// rejects that shows up often enough to be worth decoding in-process.
+func isWebP(pic []byte) bool {
+	return len(pic) >= 12 && string(pic[0:4]) == "RIFF" && string(pic[8:12]) == "WEBP"
 }
 
 // parsePictureBlock extracts the picture type and raw image bytes from a

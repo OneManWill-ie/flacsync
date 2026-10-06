@@ -1,8 +1,9 @@
 # flacsync
 
-A background Go service that mirrors a lossless FLAC library into a
-mobile-friendly Opus library, keeps M3U playlists in sync in both directions,
-and stays out of the way in the system tray.
+A background Go service that mirrors a lossless audio library — FLAC, ALAC in
+m4a, and the other formats ffmpeg can read — into a mobile-friendly Opus
+library, keeps M3U playlists in sync in both directions, and stays out of the
+way in the system tray.
 
 Transport between desktop and phone is Syncthing's job. This program only cares
 about the four folders Syncthing sees.
@@ -20,6 +21,21 @@ For a Windows build without a console window:
 go build -ldflags "-H=windowsgui" -o flacsync.exe .
 ```
 
+On Windows, `build.ps1` wraps the whole dance — it refuses to build over a
+running instance (or kills it with `-Force`), rebuilds the icon only when
+`logo.ico` changed, and passes the right flags:
+
+```powershell
+.\build.ps1              # tray build, no console window
+.\build.ps1 -Console     # keep the console so -v logs are visible
+.\build.ps1 -Release     # -trimpath -s -w, like the published archives
+.\build.ps1 -Test -Run   # vet + test first, then launch the result
+```
+
+`build.cmd` is a double-clickable wrapper for the same script. `-Out` puts
+the build somewhere other than `flacsync.exe`, which lets a new version be
+built while the old one is still running.
+
 The Windows executable includes the application icon. If `logo.ico` changes,
 regenerate the Windows resource before building:
 
@@ -28,15 +44,14 @@ windres '--preprocessor=gcc -E -xc -DRC_INVOKED' app.rc -O coff -o flacsync_wind
 go build -o flacsync.exe .
 ```
 
-Requires Go 1.22+ and an encoder on `PATH`:
+Requires Go 1.26+ and, on `PATH`:
 
-- **`opusenc`** (from `opus-tools (https://opus-codec.org/downloads/)`) — recommended. Carries tags *and* embedded
-  cover art into the Opus files.
-- **`ffmpeg`** with `libopus` — always works, but cannot embed cover art (see
-  below). Also needed for the `cover.jpg` sidecar and nothing else.
-
-`"encoder": "auto"` picks opusenc when it is installed and falls back to
-ffmpeg.
+- **`opusenc`** (from `opus-tools (https://opus-codec.org/downloads/)`) — required. Carries tags *and* embedded
+  cover art into the Opus files. `"encoder": "auto"` refuses to run without it
+  rather than quietly building an art-less mirror.
+- **`ffmpeg`** — needed to decode non-FLAC sources (`m4a`/ALAC, AIFF, WAV, APE,
+  WavPack, TTA). It can also encode (`"encoder": "ffmpeg"`), but that cannot
+  embed cover art (see below), so it is an explicit choice only.
 
 Platform packages needed by the tray and the folder picker, both of which use
 cgo:
@@ -58,11 +73,19 @@ suppress the console window.
 ./flacsync -headless    # no tray, for a systemd user unit or launchd job
 ./flacsync -v           # log every filesystem event and job
 ./flacsync -config /path/to/config.json
+./flacsync -log /path/to/flacsync.log
 ```
 
 First launch has no folders configured, so the tray shows `Status: Needs setup`.
 Open **Settings…** and pick the four directories; the engine restarts itself as
 soon as they are saved.
+
+Logs go to stderr, including pipes and `2>` redirects. Windows builds made
+with `-H=windowsgui` have no stderr at all, so they write to `flacsync.log`
+beside `config.json` automatically; `-log` selects a different file anywhere.
+When no encoder is found the tray shows `Status: Encoder unavailable` and
+nothing is queued; install opusenc and save the settings (or restart the app)
+to retry.
 
 ### Start Automatically on Windows
 
@@ -105,8 +128,9 @@ Linux, `~/Library/Application Support/flacsync/` on macOS,
 ```
 
 `workers` defaults to half the CPU count, leaving headroom for everything else
-on the machine. `encoder` is `auto`, `ffmpeg` or `opusenc`; `cover_art` is
-`auto`, `folder` or `none`.
+on the machine. `encoder` is `auto`, `ffmpeg` or `opusenc`; `auto` means
+opusenc and errors if it is missing. `cover_art` is `auto`, `folder` or
+`none`.
 
 ## Layout
 
@@ -120,16 +144,26 @@ internal/scanner           boot-time diff of both libraries      (Module C)
 internal/watcher           fsnotify + recursive + debounce        (Module D)
 internal/worker            worker pool                           (Module E)
 internal/playlist          M3U translation + SHA256 loop guard   (Module F)
-internal/ffmpeg            the transcode command
+internal/transcode         ffmpeg/opusenc command lines
+internal/media             lossless extensions -> Opus mapping
 internal/paths             mirror path mapping, ignore rules
+internal/job               the unit of work
 internal/icon              embedded tray icon
 ```
 
 ## How it behaves
 
-**Startup diff.** Walks all four roots. A FLAC with no Opus twin, or one newer
-than its twin, is queued for conversion. An Opus file whose FLAC source is gone
-is deleted, and any directories that leaves empty are removed.
+**Formats.** Anything with a lossless extension the engine knows — `.flac`,
+`.m4a` (ALAC), `.aiff`, `.aif`, `.wav`, `.ape`, `.wv`, `.tta` — is treated as
+a source. FLAC goes straight to opusenc; everything else is decoded to a
+temporary FLAC with ffmpeg first, which carries the tags and the attached
+picture across. If several formats own the same Opus twin (`song.flac` and
+`song.m4a`), the earlier extension in that list wins, and deleting the loser
+does not touch the mirror.
+
+**Startup diff.** Walks all four roots. A source with no Opus twin, or one
+newer than its twin, is queued for conversion. An Opus file whose source is
+gone is deleted, and any directories that leaves empty are removed.
 
 **Watching.** Every root is watched recursively; new subdirectories are picked
 up as they appear, and the files already inside them are replayed (an album can
@@ -162,6 +196,9 @@ still gets the right extension, and stream URLs pass through untouched.
 
 No list of known path prefixes is needed: a candidate only wins when the file
 it points at is really there, so a wrong guess cannot silently invent a path.
+Entries ending in any source extension are rewritten to `.opus` on the mobile
+side; coming back, an `.opus` entry maps to whichever lossless twin (`.flac`,
+`.m4a`, …) actually exists on the desktop.
 
 **Playlist file names are never changed.** The two sides are paired by relative
 path, so renaming `My Playlist.m3u` to `my_playlist.m3u8` during translation
@@ -173,16 +210,23 @@ forever. Normalise names once on the desktop side instead.
 - **Playlist deletions do not propagate at startup**, only when the watcher
   sees them live. At boot there is no way to distinguish "deleted on the phone"
   from "not synced yet", and guessing wrong destroys a playlist.
-- **Cover art depends on the encoder.** ffmpeg silently discards the attached
-  picture when muxing Ogg Opus and will not write the `METADATA_BLOCK_PICTURE`
-  comment that Opus files use for artwork; `-vn` just makes that explicit.
-  opusenc carries it across. With ffmpeg, `cover_art: "auto"` writes a
-  `cover.jpg` beside the tracks instead, which mainstream mobile players fall
-  back to. Tags survive either way, as stream-level Vorbis comments.
+- **opusenc is required to keep artwork.** ffmpeg silently discards the
+  attached picture when muxing Ogg Opus and will not write the
+  `METADATA_BLOCK_PICTURE` comment that Opus files use for artwork; `-vn` just
+  makes that explicit. `"encoder": "auto"` therefore refuses to fall back to
+  ffmpeg: the tray shows `Status: Encoder unavailable` instead of quietly
+  building an art-less mirror. Selecting `"encoder": "ffmpeg"` on purpose
+  still works, and `cover_art: "auto"` then writes a `cover.jpg` beside the
+  tracks, which mainstream mobile players fall back to. WebP covers are
+  converted to JPEG in-process, so artwork survives even without ffmpeg.
+  Pictures decoded out of non-FLAC sources are re-tagged as `Front Cover`,
+  because ffmpeg writes every picture it muxes as type 0 (`Other`), which
+  foobar2000 and friends refuse to show. Tags survive either way, as
+  stream-level Vorbis comments.
 - **Sidecar covers are cleaned up.** When the last track in a mirrored folder
   is deleted, any `cover.jpg` / `folder.jpg` left beside it goes too, otherwise
   it would keep empty album folders alive forever.
-- **Modification times drive the audio diff.** A re-tagged FLAC is re-encoded.
+- **Modification times drive the audio diff.** A re-tagged source is re-encoded.
   Restoring old files from a backup that preserves timestamps will not trigger
   one; use **Rescan library** after deleting the stale Opus if that happens.
 - **Manual edits in the Opus mirror are ignored.** Delete an `.opus` whose
@@ -199,5 +243,6 @@ forever. Normalise names once on the desktop side instead.
 go test ./...
 ```
 
-Covers playlist translation across all the entry forms, round-trip stability,
-the loop guard, path mapping, and empty-directory pruning.
+Covers playlist translation across the entry forms and extension sets
+(m4a ↔ opus both ways), the lossless-extension preference rules, and path
+mapping.

@@ -10,10 +10,12 @@ import (
 
 	"flacsync/internal/config"
 	"flacsync/internal/job"
+	"flacsync/internal/media"
 	"flacsync/internal/paths"
 	"flacsync/internal/playlist"
 	"flacsync/internal/scanner"
 	"flacsync/internal/state"
+	"flacsync/internal/transcode"
 	"flacsync/internal/watcher"
 	"flacsync/internal/worker"
 )
@@ -50,8 +52,19 @@ func (a *App) Start() {
 
 	a.st.Reset()
 	a.st.SetConfigured(cfg.Complete())
+	a.st.SetProblem("")
 
 	if err := cfg.Validate(); err != nil {
+		a.logger.Printf("engine idle: %v", err)
+		return
+	}
+
+	// Resolve the encoder here, before any job can be queued: a missing
+	// binary should park the engine with a visible status, not fail every
+	// track one at a time.
+	tool, err := transcode.Select(cfg.Encoder, cfg.FFmpegPath, cfg.OpusencPath)
+	if err != nil {
+		a.st.SetProblem("Encoder unavailable")
 		a.logger.Printf("engine idle: %v", err)
 		return
 	}
@@ -66,7 +79,7 @@ func (a *App) Start() {
 
 	go func() {
 		defer close(done)
-		a.run(ctx, cfg, rescan)
+		a.run(ctx, cfg, tool, rescan)
 	}()
 }
 
@@ -127,8 +140,8 @@ func (a *App) Rescan() {
 }
 
 // run is the pipeline: pool, watcher, initial scan, then the event loop.
-func (a *App) run(ctx context.Context, cfg config.Config, rescan <-chan struct{}) {
-	pool := worker.New(cfg, a.st, a.hashes, a.logger)
+func (a *App) run(ctx context.Context, cfg config.Config, tool transcode.Tool, rescan <-chan struct{}) {
+	pool := worker.New(cfg, tool, a.st, a.hashes, a.logger)
 	pool.Start(ctx)
 	defer pool.Wait()
 
@@ -202,37 +215,47 @@ func (a *App) jobsFor(cfg config.Config, ev watcher.Event) []job.Job {
 	return nil
 }
 
-// losslessJobs: a FLAC appeared or changed, so (re)encode it; a FLAC vanished,
-// so drop its Opus twin.
+// losslessJobs: a lossless source appeared or changed, so (re)encode it; a
+// source vanished, so drop its Opus twin unless another format still owns it.
 func (a *App) losslessJobs(cfg config.Config, path string) []job.Job {
-	if !paths.HasExt(path, ".flac") {
+	if !media.IsLossless(path) {
 		return nil
 	}
-	dst, err := paths.Map(cfg.LosslessDir, cfg.LossyDir, path, ".flac", ".opus")
+	dst, err := media.OpusPath(cfg.LosslessDir, cfg.LossyDir, path)
 	if err != nil {
 		return nil
 	}
-	if paths.Exists(path) {
-		return []job.Job{{Kind: job.Convert, Src: path, Dst: dst, Root: cfg.LossyDir}}
+
+	if !paths.Exists(path) {
+		// Only drop the twin when no other lossless file replaced it: a
+		// deleted song.flac must not take the mirror with it while
+		// song.m4a is still there.
+		if _, ok := media.SourcePath(cfg.LosslessDir, cfg.LossyDir, dst); ok {
+			return nil
+		}
+		return []job.Job{{Kind: job.Delete, Dst: dst, Root: cfg.LossyDir}}
 	}
-	return []job.Job{{Kind: job.Delete, Dst: dst, Root: cfg.LossyDir}}
+
+	// When several formats own the same twin, the preferred one drives the
+	// conversion; events for the losing format are ignored.
+	if media.PreferredSource(cfg.LosslessDir, path) != path {
+		return nil
+	}
+	return []job.Job{{Kind: job.Convert, Src: path, Dst: dst, Root: cfg.LossyDir}}
 }
 
 // lossyJobs handles tampering with the mirror: a deleted .opus whose source
 // still exists is re-encoded, and an .opus with no source is pruned.
 func (a *App) lossyJobs(cfg config.Config, path string) []job.Job {
-	if !paths.HasExt(path, ".opus") {
+	if !media.IsOpus(path) {
 		return nil
 	}
-	src, err := paths.Map(cfg.LossyDir, cfg.LosslessDir, path, ".opus", ".flac")
-	if err != nil {
-		return nil
-	}
+	src, ok := media.SourcePath(cfg.LosslessDir, cfg.LossyDir, path)
 
 	switch {
-	case !paths.Exists(src) && paths.Exists(path):
+	case !ok && paths.Exists(path):
 		return []job.Job{{Kind: job.Delete, Dst: path, Root: cfg.LossyDir}}
-	case paths.Exists(src) && !paths.Exists(path):
+	case ok && !paths.Exists(path):
 		return []job.Job{{Kind: job.Convert, Src: src, Dst: path, Root: cfg.LossyDir}}
 	}
 	return nil

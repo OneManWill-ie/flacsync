@@ -1,0 +1,74 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: flacsync-windows-amd64
+            bin: flacsync.exe
+            ldflags: "-H=windowsgui -s -w"
+          - os: ubuntu-latest
+            artifact: flacsync-linux-amd64
+            bin: flacsync
+            ldflags: "-s -w"
+          - os: macos-latest
+            artifact: flacsync-macos-arm64
+            bin: flacsync
+            ldflags: "-s -w"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The tray and folder picker need cgo, so each artifact must be built on
+      # its own platform; cross-compiling from Windows does not work.
+      - name: Install GTK and AppIndicator (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev
+
+      - name: Build
+        shell: bash
+        run: go build -trimpath -ldflags "${{ matrix.ldflags }}" -o "dist/${{ matrix.bin }}" .
+
+      - name: Package
+        shell: bash
+        run: tar -C dist -czf "${{ matrix.artifact }}.tar.gz" "${{ matrix.bin }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" artifacts/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes artifacts/*
+          fi

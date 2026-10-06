@@ -40,6 +40,7 @@ type State struct {
 	failed     int
 	paused     bool
 	configured bool
+	problem    string
 	closed     bool
 
 	updates chan string
@@ -62,6 +63,16 @@ func (s *State) SetConfigured(ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.configured = ok
+	s.publishLocked()
+}
+
+// SetProblem records a blocking condition, such as a missing audio encoder,
+// that keeps the engine idle; the tray shows it instead of the counters. An
+// empty string clears it. Keep the text short and put the detail in the log.
+func (s *State) SetProblem(text string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.problem = text
 	s.publishLocked()
 }
 
@@ -191,6 +202,8 @@ func (s *State) statusLocked() string {
 	switch {
 	case !s.configured:
 		return "Status: Needs setup"
+	case s.problem != "":
+		return "Status: " + s.problem
 	case s.paused && remaining > 0:
 		return fmt.Sprintf("Status: Paused (%d left)", remaining)
 	case s.paused:
